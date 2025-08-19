@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from functools import lru_cache
+from contextvars import ContextVar
 from typing import Callable
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from backend.common.i18n import i18n
+from backend.core.conf import settings
+
+# 使用 ContextVar 来存储每个请求的语言设置
+current_language_context: ContextVar[str] = ContextVar('current_language', default=settings.I18N_DEFAULT_LANGUAGE)
 
 
 class I18nMiddleware(BaseHTTPMiddleware):
@@ -22,30 +25,60 @@ class I18nMiddleware(BaseHTTPMiddleware):
         """
         language = self.get_current_language(request)
 
-        # 设置国际化语言
-        if language and i18n.current_language != language:
-            i18n.current_language = language
+        # 设置当前请求的语言上下文
+        current_language_context.set(language)
 
         response = await call_next(request)
 
         return response
 
-    @lru_cache(maxsize=128)
-    def get_current_language(self, request: Request) -> str | None:
+    def get_current_language(self, request: Request) -> str:
         """
         获取当前请求的语言偏好
 
         :param request: FastAPI 请求对象
-        :return:
+        :return: 语言代码
         """
+        # 优先级：URL参数 > Header > 默认语言
+
+        # 1. 检查 URL 参数
+        lang_from_query = request.query_params.get('lang')
+        if lang_from_query:
+            mapped_lang = self._map_language(lang_from_query)
+            if mapped_lang:
+                return mapped_lang
+
+        # 2. 检查 Accept-Language 头
         accept_language = request.headers.get('Accept-Language', '')
-        if not accept_language:
-            return None
+        if accept_language:
+            # 解析 Accept-Language 头，格式如: "zh-CN,zh;q=0.9,en;q=0.8"
+            languages = []
+            for lang_item in accept_language.split(','):
+                lang_code = lang_item.split(';')[0].strip()
+                if lang_code:
+                    languages.append(lang_code)
 
-        languages = [lang.split(';')[0] for lang in accept_language.split(',')]
-        lang = languages[0].lower().strip()
+            if languages:
+                mapped_lang = self._map_language(languages[0])
+                if mapped_lang:
+                    return mapped_lang
 
-        # 语言映射
+        # 3. 返回默认语言
+        return settings.I18N_DEFAULT_LANGUAGE
+
+    def _map_language(self, lang: str) -> str:
+        """
+        映射语言代码到标准格式
+
+        :param lang: 原始语言代码
+        :return: 标准语言代码
+        """
+        if not lang:
+            return settings.I18N_DEFAULT_LANGUAGE
+
+        lang = lang.lower().strip()
+
+        # 语言映射表
         lang_mapping = {
             'zh': 'zh-CN',
             'zh-cn': 'zh-CN',
@@ -54,4 +87,13 @@ class I18nMiddleware(BaseHTTPMiddleware):
             'en-us': 'en-US',
         }
 
-        return lang_mapping.get(lang, lang)
+        return lang_mapping.get(lang, settings.I18N_DEFAULT_LANGUAGE)
+
+
+def get_current_language() -> str:
+    """
+    获取当前请求的语言设置
+
+    :return: 当前语言代码
+    """
+    return current_language_context.get()
